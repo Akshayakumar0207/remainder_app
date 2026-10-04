@@ -36,3 +36,10 @@ for 1-2 minutes from now, and keep the tab open.
 - The alarm rings only while the tab is open. Browsers do not allow sound or a screen takeover from a closed page.
 - Times are stored in UTC and shown in your local time.
 - Set a real `JWT_SECRET` in `backend/.env` before deploying.
+
+## Deploy (free)
+1. **Supabase:** create a project, copy Connect > Session pooler URI (IPv4) as DATABASE_URL.
+2. **Render:** New Web Service, Root Directory `backend`, Build `pip install -r requirements.txt`,
+   Start `uvicorn main:app --host 0.0.0.0 --port $PORT`. Env vars: DATABASE_URL, JWT_SECRET, PYTHON_VERSION=3.12.3.
+3. Put your Render URL in `frontend/vercel.json`, then push to GitHub.
+4. **Vercel:** import the repo, Root Directory `frontend` (Vite). Deploy, then open the link on your phone.

@@ -1,4 +1,5 @@
-import os, sqlite3, time, hashlib, secrets, uuid
+import os, time, hashlib, secrets, uuid, base64
+import psycopg2, psycopg2.extras
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
@@ -11,20 +12,35 @@ import jwt
 load_dotenv()
 SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+DATABASE_URL = os.environ["DATABASE_URL"]
 os.makedirs("uploads", exist_ok=True)
 
 
+class Conn:
+    """Tiny wrapper so queries can keep using ? placeholders."""
+    def __init__(self):
+        self.c = psycopg2.connect(DATABASE_URL)
+
+    def execute(self, q, p=()):
+        cur = self.c.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(q.replace("?", "%s"), p)
+        return cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, et, ev, tb):
+        (self.c.rollback if et else self.c.commit)()
+        self.c.close()
+
+
 def db():
-    c = sqlite3.connect("app.db")
-    c.row_factory = sqlite3.Row
-    return c
+    return Conn()
 
 
 with db() as c:
-    c.executescript("""
-    create table if not exists users(id integer primary key autoincrement, email text unique, name text, pw text default '', pic text default '');
-    create table if not exists reminders(id integer primary key autoincrement, user_id int, title text, description text default '', category text default 'Other', remind_at text, status text default 'pending');
-    """)
+    c.execute("create table if not exists users(id serial primary key, email text unique, name text, pw text default '', pic text default '')")
+    c.execute("create table if not exists reminders(id serial primary key, user_id int, title text, description text default '', category text default 'Other', remind_at text, status text default 'pending')")
 
 app = FastAPI(title="Reminder Alarm API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -87,8 +103,9 @@ def register(b: AuthIn):
     with db() as c:
         if c.execute("select 1 from users where email=?", (email,)).fetchone():
             raise HTTPException(400, "This email is already registered. Log in instead.")
-        cur = c.execute("insert into users(email,name,pw) values(?,?,?)", (email, b.name or email.split("@")[0], hash_pw(b.password)))
-    return {"token": make_token(cur.lastrowid)}
+        cur = c.execute("insert into users(email,name,pw) values(?,?,?) returning id", (email, b.name or email.split("@")[0], hash_pw(b.password)))
+        uid = cur.fetchone()["id"]
+    return {"token": make_token(uid)}
 
 
 @app.post("/api/login")
@@ -114,8 +131,8 @@ def google_login(b: GoogleIn):
     with db() as c:
         u = c.execute("select * from users where email=?", (email,)).fetchone()
         if not u:
-            cur = c.execute("insert into users(email,name,pic) values(?,?,?)", (email, info.get("name", email), info.get("picture", "")))
-            uid = cur.lastrowid
+            cur = c.execute("insert into users(email,name,pic) values(?,?,?) returning id", (email, info.get("name", email), info.get("picture", "")))
+            uid = cur.fetchone()["id"]
         else:
             uid = u["id"]
     return {"token": make_token(uid)}
@@ -131,12 +148,14 @@ def upload_pic(file: UploadFile = File(...), u=Depends(me)):
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in (".png", ".jpg", ".jpeg", ".webp"):
         raise HTTPException(400, "Upload a PNG, JPG or WEBP image.")
-    name = uuid.uuid4().hex + ext
-    with open(f"uploads/{name}", "wb") as f:
-        f.write(file.file.read())
+    data = file.file.read()
+    if len(data) > 400_000:
+        raise HTTPException(400, "Image is too large. Use one under 400 KB.")
+    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/" + ext[1:]
+    pic = f"data:{mime};base64," + base64.b64encode(data).decode()
     with db() as c:
-        c.execute("update users set pic=? where id=?", (f"/uploads/{name}", u["id"]))
-    return {"pic": f"/uploads/{name}"}
+        c.execute("update users set pic=? where id=?", (pic, u["id"]))
+    return {"pic": pic}
 
 
 @app.get("/api/reminders")
@@ -151,9 +170,10 @@ def create_reminder(b: ReminderIn, u=Depends(me)):
     if not b.title.strip():
         raise HTTPException(400, "Give the reminder a title.")
     with db() as c:
-        cur = c.execute("insert into reminders(user_id,title,description,category,remind_at) values(?,?,?,?,?)",
+        cur = c.execute("insert into reminders(user_id,title,description,category,remind_at) values(?,?,?,?,?) returning id",
                         (u["id"], b.title.strip(), b.description, b.category, b.remind_at))
-    return {"id": cur.lastrowid}
+        rid = cur.fetchone()["id"]
+    return {"id": rid}
 
 
 @app.patch("/api/reminders/{rid}")
