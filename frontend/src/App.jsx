@@ -19,7 +19,7 @@ const beep = () => {
 /* ---------- api ---------- */
 async function api(path, opts = {}, isForm = false) {
   const t = localStorage.getItem("token");
-  const res = await fetch("/api" + path, {
+  const res = await fetch((import.meta.env.VITE_API_URL || "") + "/api" + path, {
     ...opts,
     headers: { ...(isForm ? {} : { "Content-Type": "application/json" }), ...(t ? { Authorization: "Bearer " + t } : {}) },
     body: isForm ? opts.body : opts.body && JSON.stringify(opts.body),
